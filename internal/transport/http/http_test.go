@@ -2,117 +2,177 @@ package httptransport
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
+
+	"github.com/Shyyw1e/ozon-bank-url-test/internal/core"
+	"github.com/Shyyw1e/ozon-bank-url-test/internal/storage/memory"
 )
 
-func newTestLogger(buf *bytes.Buffer) *slog.Logger {
-	// Пишем JSON в буфер, чтобы потом проверить наличие полей
-	return slog.New(slog.NewJSONHandler(buf, &slog.HandlerOptions{
+func testLogger() *slog.Logger {
+	var buf bytes.Buffer
+	return slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{
 		Level:     slog.LevelDebug,
 		AddSource: false,
 	}))
 }
 
-func TestRouter_HealthzAndReadyz(t *testing.T) {
-	var buf bytes.Buffer
-	log := newTestLogger(&buf)
+func newTestRouter(t *testing.T) http.Handler {
+	t.Helper()
+	st := memory.New()
+	svc := core.NewShortener(st, core.NewCode)
+	return NewRouter(testLogger(), svc)
+}
 
-	h := NewRouter(log)
+func TestPOST_Create_OK(t *testing.T) {
+	h := newTestRouter(t)
 
-	// /healthz
-	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	body := `{"url":"https://example.com/path?q=1"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/urls", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Forwarded-Proto", "https")
+
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 
-	if rr.Code != http.StatusOK {
-		t.Fatalf("/healthz code=%d want=%d", rr.Code, http.StatusOK)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status=%d, want=%d", rr.Code, http.StatusCreated)
 	}
-	if !strings.Contains(rr.Body.String(), "ok") {
-		t.Fatalf("/healthz body=%q", rr.Body.String())
+	var resp struct {
+		Code     string `json:"code"`
+		ShortURL string `json:"short_url"`
 	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("bad json: %v; body=%q", err, rr.Body.String())
+	}
+	if !core.IsValidCode(resp.Code) {
+		t.Fatalf("invalid code in response: %q", resp.Code)
+	}
+	if !strings.HasPrefix(resp.ShortURL, "https://") {
+		t.Fatalf("short_url must start with https://, got %q", resp.ShortURL)
+	}
+	if loc := rr.Header().Get("Location"); loc != resp.ShortURL {
+		t.Fatalf("Location header mismatch: %q vs %q", loc, resp.ShortURL)
+	}
+	if ct := rr.Header().Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("content-type=%q, want application/json", ct)
+	}
+}
 
-	// убедимся, что лог миддлвари что-то записал
-	if got := buf.String(); !strings.Contains(got, "http_request") || !strings.Contains(got, "\"status\":200") {
-		t.Fatalf("log not contains expected attrs, got: %s", got)
-	}
+func TestPOST_Create_InvalidURL(t *testing.T) {
+	h := newTestRouter(t)
 
-	// /readyz
-	buf.Reset()
-	req2 := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	body := `{"url":"ftp://bad.example"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/urls", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400", rr.Code)
+	}
+}
+
+func TestPOST_Create_Idempotent_SameCode(t *testing.T) {
+	h := newTestRouter(t)
+	url := `{"url":"https://example.com/idem"}`
+	req1 := httptest.NewRequest(http.MethodPost, "/api/v1/urls", strings.NewReader(url))
+	req1.Header.Set("Content-Type", "application/json")
+	rr1 := httptest.NewRecorder()
+	h.ServeHTTP(rr1, req1)
+	if rr1.Code != http.StatusCreated {
+		t.Fatalf("first create status=%d", rr1.Code)
+	}
+	var r1 struct {
+		Code     string `json:"code"`
+		ShortURL string `json:"short_url"`
+	}
+	_ = json.Unmarshal(rr1.Body.Bytes(), &r1)
+
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/urls", strings.NewReader(url))
+	req2.Header.Set("Content-Type", "application/json")
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, req2)
+	if rr2.Code != http.StatusCreated && rr2.Code != http.StatusOK {
+		t.Fatalf("second create status=%d, want 201 or 200", rr2.Code)
+	}
+	var r2 struct {
+		Code     string `json:"code"`
+		ShortURL string `json:"short_url"`
+	}
+	_ = json.Unmarshal(rr2.Body.Bytes(), &r2)
 
-	if rr2.Code != http.StatusOK {
-		t.Fatalf("/readyz code=%d want=%d", rr2.Code, http.StatusOK)
-	}
-	if !strings.Contains(rr2.Body.String(), "ready") {
-		t.Fatalf("/readyz body=%q", rr2.Body.String())
-	}
-	if got := buf.String(); !strings.Contains(got, "http_request") || !strings.Contains(got, "\"status\":200") {
-		t.Fatalf("log not contains expected attrs (readyz), got: %s", got)
+	if r1.Code != r2.Code {
+		t.Fatalf("idempotency violated: %q vs %q", r1.Code, r2.Code)
 	}
 }
 
-func TestRouter_Metrics(t *testing.T) {
-	var buf bytes.Buffer
-	log := newTestLogger(&buf)
-	h := NewRouter(log)
+func TestGET_Code_Redirect_Found(t *testing.T) {
+	// Подготовим запись через сервис, затем проверим редирект
+	st := memory.New()
+	svc := core.NewShortener(st, core.NewCode)
+	orig := "https://golang.org"
+	// создадим заранее
+	code, err := svc.Create(context.Background(), orig)
+	if err != nil {
+		t.Fatalf("prep Create err: %v", err)
+	}
+	h := NewRouter(testLogger(), svc)
 
-	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req := httptest.NewRequest(http.MethodGet, "/"+code, nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusFound {
+		t.Fatalf("status=%d, want 302", rr.Code)
+	}
+	if loc := rr.Header().Get("Location"); loc != orig {
+		t.Fatalf("Location=%q, want %q", loc, orig)
+	}
+}
+
+func TestGET_Code_NotFound(t *testing.T) {
+	h := newTestRouter(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/NO_SUCH__1", nil) // 10 символов, валидный формат, но не в store
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status=%d, want 404", rr.Code)
+	}
+}
+
+func TestGET_JSON_Resolve_OK(t *testing.T) {
+	st := memory.New()
+	svc := core.NewShortener(st, core.NewCode)
+	orig := "https://example.com/json"
+	code, err := svc.Create(context.Background(), orig)
+	if err != nil {
+		t.Fatalf("prep Create err: %v", err)
+	}
+	h := NewRouter(testLogger(), svc)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/urls/"+code, nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusOK {
-		t.Fatalf("/metrics code=%d want=%d", rr.Code, http.StatusOK)
+		t.Fatalf("status=%d, want 200", rr.Code)
 	}
-	// promtext формат начинается с # HELP/TYPE и text/plain; version=0.0.4
-	ct := rr.Result().Header.Get("Content-Type")
-	if !strings.HasPrefix(ct, "text/plain") {
-		t.Fatalf("/metrics content-type=%q, want text/plain", ct)
+	var resp struct {
+		URL string `json:"url"`
 	}
-	body := rr.Body.String()
-	if !strings.Contains(body, "# HELP") || !strings.Contains(body, "go_goroutines") {
-		t.Fatalf("/metrics unexpected body (truncated): %.200s", body)
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("bad json: %v", err)
 	}
-}
-
-func TestLoggingMiddleware_IncludesBasicAttrs(t *testing.T) {
-	var buf bytes.Buffer
-	log := newTestLogger(&buf)
-
-	// Заворачиваем заглушку хэндлера в логирующую миддлварь
-	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(1 * time.Millisecond) // чтобы duration_ms был не нулевым
-		w.WriteHeader(http.StatusTeapot) // 418
-		_, _ = w.Write([]byte("teapot"))
-	})
-
-	mw := LoggingMiddleware(log)(next)
-
-	req := httptest.NewRequest(http.MethodGet, "/brew/coffee", nil)
-	rr := httptest.NewRecorder()
-	mw.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusTeapot {
-		t.Fatalf("status=%d want=418", rr.Code)
-	}
-
-	logOut := buf.String()
-	for _, sub := range []string{
-		"http_request",
-		"\"method\":\"GET\"",
-		"\"path\":\"/brew/coffee\"",
-		"\"status\":418",
-		"\"duration_ms\":",
-		"\"request_id\":", // выставляется chi/middleware.RequestID в роутере, но здесь может быть пусто,
-	} {
-		if !strings.Contains(logOut, sub) {
-			t.Fatalf("log missing %s; got: %s", sub, logOut)
-		}
+	if resp.URL != orig {
+		t.Fatalf("url=%q, want %q", resp.URL, orig)
 	}
 }
