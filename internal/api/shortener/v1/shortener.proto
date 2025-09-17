@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package shortener.v1;
+option go_package = "github.com/Shyyw1e/ozon-bank-url-test/internal/api/shortener/v1;shortenerv1";
+
+// Сервис сокращения ссылок
+service Shortener {
+  // Создать короткий код для URL
+  rpc Shorten (ShortenRequest) returns (ShortenResponse);
+  // Получить оригинальный URL по коду
+  rpc Resolve (ResolveRequest) returns (ResolveResponse);
+}
+
+// Запрос на сокращение
+message ShortenRequest {
+  string url = 1; // исходный URL
+}
+
+// Ответ на сокращение
+message ShortenResponse {
+  string code = 1; // сгенерированный код
+  // по желанию можно добавить short_url в будущем
+}
+
+// Запрос на получение оригинала
+message ResolveRequest {
+  string code = 1; // короткий код
+}
+
+// Ответ с оригинальной ссылкой
+message ResolveResponse {
+  string url = 1; // оригинальный URL
+}

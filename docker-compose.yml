@@ -22,10 +22,11 @@ services:
         condition: service_healthy
     environment:
       HTTP_ADDR: ":8080"
+      GRPC_ADDR: ":9090"
       LOG_LEVEL: "INFO"
       STORAGE_BACKEND: "postgres"
       DATABASE_URL: "postgres://postgres:Shyywie_8169@db:5432/ozonbanktest?sslmode=disable"
-    ports: ["8080:8080"]
+    ports: ["8080:8080", "9090:9090"]
 
 volumes:
   pgdata:

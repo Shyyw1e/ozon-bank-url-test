@@ -9,6 +9,7 @@ import (
 
 type Config struct {
 	HTTPAddr		string
+	GRPCAddr        string  
 	LogLevel		string
 	StorageBackend	string
 }
@@ -17,6 +18,7 @@ func Load() (*Config, error){
 	var cfg Config
 
 	flag.StringVar(&cfg.HTTPAddr, "http-addr", getenv("HTTP_ADDR", ":8080"), "HTTP listen address")
+	flag.StringVar(&cfg.GRPCAddr, "grpc-addr", getenv("GRPC_ADDR", ":9090"), "gRPC listen address")
 	flag.StringVar(&cfg.LogLevel, "log-level", getenv("LOG_LEVEL", "INFO"), "log level: debug|info|warn|error")
 	flag.StringVar(&cfg.StorageBackend, "storage", getenv("STORAGE_BACKEND", "memory"), "storage backend: memory|postgres")
 
